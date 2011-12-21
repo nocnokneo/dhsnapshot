@@ -1,12 +1,14 @@
 #!/usr/bin/perl -w
 use strict;
+use File::Temp qw/ tempdir /;
 require File::Spec;
 
 our %conf;
 $conf{'basedir'} = get_basedir();
-$conf{'emptydir'} = "$conf{'basedir'}/__emptydir/";
+$conf{'private_key'} = "$conf{'basedir'}/id_rsa";
+$conf{'rsync_options'} = '';
 
-require 'dhsnapshot.conf';
+require '/etc/dhsnapshot/dhsnapshot.conf';
 
 my $lowest_interval = 'daily';
 my %rotation;
@@ -38,19 +40,33 @@ $rotation{'weekly'} = "
 -rename daily.6 weekly.0
 ";
 
+sub debug {
+    print shift if $conf{'debug'};
+}
+
 #
 # Check which action was called and execute it.
 #
 my $action = $ARGV[0] ? $ARGV[0] : "";
 if ($action eq "daily") {
+    debug "Running daily backup\n";
     rotate("daily", 6);
     sync();
 } elsif ($action eq "weekly") {
+    debug "Running weekly backup\n";
     rotate("weekly", 3);
 } elsif ($action eq "monthly") {
+    debug "Running monthly backup\n";
     rotate("monthly", 5);
 } elsif ($action eq "sync") {
+    debug "Running sync\n";
     sync();
+} elsif ($action eq "reset") {
+    print "This will DELETE ALL BACKUPS for this host. Proceed? [Yes/NO] ";
+    while (($_ = <STDIN>) !~ /^(yes|no|)\n/i) {
+	print STDERR "Invalid response. Enter Yes or No: ";
+    }
+    sync_all_to_empty() if (/^yes$/i);
 } else {
   print "\n";
   print "Invalid argument.\n" if $action ne "";
@@ -98,16 +114,33 @@ sub sync_to_empty {
   my $interval = shift;
   my $oldest_copy = shift;
 
-  mkdir $conf{'emptydir'};
+  debug "Deleting $conf{'backup_dest'}/${interval}.${oldest_copy}/\n";
+
+  my $emptydir = tempdir() . "/";
   system(
     $conf{'nice_path'},'-19',
     $conf{'rsync_path'},
     '-e', "ssh -oIdentityFile=$conf{'private_key'}",
     '-az', '--delete',
-    $conf{'emptydir'},
+    $emptydir,
     "$conf{'backup_dest'}/${interval}.${oldest_copy}/"
   );
-  rmdir $conf{'emptydir'};
+}
+
+# sync_all_to_empty(interval, oldest_copy)
+#
+#Delete ALL backups for this host. Start fresh.
+sub sync_all_to_empty {
+  debug "Deleting $conf{'backup_dest'}/\n";
+
+  my $emptydir = tempdir() . "/";
+  system(
+    $conf{'rsync_path'},
+    '-e', "ssh -oIdentityFile=$conf{'private_key'}",
+    '-az', '--delete',
+    $emptydir,
+    "$conf{'backup_dest'}/"
+  );
 }
 
 # sftp_rotate(interval)
@@ -117,6 +150,7 @@ sub sync_to_empty {
 #backup directories
 sub sftp_rotate {
   my $interval = shift;
+  debug "Rotating $interval backups";
   open(
     my $sftp_handle, "|-", $conf{'sftp_path'},
     (
